@@ -1,3 +1,9 @@
+"""
+函数调用策略实现
+这个模块实现了一个基于函数调用的智能代理策略，允许代理通过调用预定义的函数来完成任务。
+代理可以根据需要选择合适的函数并传入适当的参数。
+"""
+
 import json
 import time
 from collections.abc import Generator
@@ -35,31 +41,62 @@ from utils.mcp_client import McpClients
 
 
 class FunctionCallingParams(BaseModel):
-    query: str
-    instruction: str | None
-    model: AgentModelConfig
-    tools: list[ToolEntity] | None
-    mcp_servers_config: str | None
-    maximum_iterations: int = 3
+    """
+    函数调用策略的参数配置类
+    定义了运行函数调用代理所需的所有参数
+    """
+    query: str  # 用户查询
+    instruction: str | None  # 系统指令
+    model: AgentModelConfig  # 模型配置
+    tools: list[ToolEntity] | None  # 可用工具列表
+    mcp_servers_config: str | None  # MCP服务器配置
+    maximum_iterations: int = 3  # 最大迭代次数
 
 
 class FunctionCallingAgentStrategy(AgentStrategy):
+    """
+    函数调用代理策略实现类
+    实现了基于函数调用的代理策略，允许代理通过调用预定义的函数来完成任务
+    """
     def __init__(self, runtime, session):
+        """
+        初始化函数调用代理策略
+        Args:
+            runtime: 运行时环境
+            session: 会话对象
+        """
         super().__init__(runtime, session)
-        self.query = ""
-        self.instruction = ""
+        self.query = ""  # 用户查询
+        self.instruction = ""  # 系统指令
 
     @property
     def _user_prompt_message(self) -> UserPromptMessage:
+        """
+        生成用户提示消息
+        Returns:
+            UserPromptMessage: 用户提示消息对象
+        """
         return UserPromptMessage(content=self.query)
 
     @property
     def _system_prompt_message(self) -> SystemPromptMessage:
+        """
+        生成系统提示消息
+        Returns:
+            SystemPromptMessage: 系统提示消息对象
+        """
         return SystemPromptMessage(content=self.instruction)
 
     def _invoke(self, parameters: dict[str, Any]) -> Generator[AgentInvokeMessage]:
         """
-        Run FunctionCall agent application
+        运行函数调用代理应用
+        实现了函数调用的核心逻辑，包括工具选择、参数传递和结果处理
+        
+        Args:
+            parameters: 运行参数
+            
+        Yields:
+            AgentInvokeMessage: 代理执行过程中的消息
         """
 
         try:
@@ -454,71 +491,94 @@ class FunctionCallingAgentStrategy(AgentStrategy):
 
     def check_tool_calls(self, llm_result_chunk: LLMResultChunk) -> bool:
         """
-        Check if there is any tool call in llm result chunk
+        检查LLM结果块中是否包含工具调用
+        Args:
+            llm_result_chunk: LLM结果块
+        Returns:
+            bool: 是否包含工具调用
         """
-        return bool(llm_result_chunk.delta.message.tool_calls)
+        return (
+            llm_result_chunk.delta
+            and llm_result_chunk.delta.message
+            and llm_result_chunk.delta.message.tool_calls
+        )
 
     def check_blocking_tool_calls(self, llm_result: LLMResult) -> bool:
         """
-        Check if there is any blocking tool call in llm result
+        检查LLM结果中是否包含阻塞式工具调用
+        Args:
+            llm_result: LLM结果
+        Returns:
+            bool: 是否包含阻塞式工具调用
         """
-        return bool(llm_result.message.tool_calls)
+        return (
+            llm_result.message
+            and llm_result.message.tool_calls
+            and len(llm_result.message.tool_calls) > 0
+        )
 
     def extract_tool_calls(
         self, llm_result_chunk: LLMResultChunk
     ) -> list[tuple[str, str, dict[str, Any]]]:
         """
-        Extract tool calls from llm result chunk
-
+        从LLM结果块中提取工具调用信息
+        Args:
+            llm_result_chunk: LLM结果块
         Returns:
-            List[Tuple[str, str, Dict[str, Any]]]: [(tool_call_id, tool_call_name, tool_call_args)]
+            list[tuple[str, str, dict[str, Any]]]: 工具调用列表，每个元素包含(工具ID, 工具名称, 参数)
         """
         tool_calls = []
-        for prompt_message in llm_result_chunk.delta.message.tool_calls:
-            args = {}
-            if prompt_message.function.arguments != "":
-                args = json.loads(prompt_message.function.arguments)
-
-            tool_calls.append(
-                (
-                    prompt_message.id,
-                    prompt_message.function.name,
-                    args,
+        if (
+            llm_result_chunk.delta
+            and llm_result_chunk.delta.message
+            and llm_result_chunk.delta.message.tool_calls
+        ):
+            for tool_call in llm_result_chunk.delta.message.tool_calls:
+                tool_calls.append(
+                    (
+                        tool_call.id,
+                        tool_call.function.name,
+                        json.loads(tool_call.function.arguments),
+                    )
                 )
-            )
-
         return tool_calls
 
     def extract_blocking_tool_calls(
         self, llm_result: LLMResult
     ) -> list[tuple[str, str, dict[str, Any]]]:
         """
-        Extract blocking tool calls from llm result
-
+        从LLM结果中提取阻塞式工具调用信息
+        Args:
+            llm_result: LLM结果
         Returns:
-            List[Tuple[str, str, Dict[str, Any]]]: [(tool_call_id, tool_call_name, tool_call_args)]
+            list[tuple[str, str, dict[str, Any]]]: 工具调用列表，每个元素包含(工具ID, 工具名称, 参数)
         """
         tool_calls = []
-        for prompt_message in llm_result.message.tool_calls:
-            args = {}
-            if prompt_message.function.arguments != "":
-                args = json.loads(prompt_message.function.arguments)
-
-            tool_calls.append(
-                (
-                    prompt_message.id,
-                    prompt_message.function.name,
-                    args,
+        if (
+            llm_result.message
+            and llm_result.message.tool_calls
+            and len(llm_result.message.tool_calls) > 0
+        ):
+            for tool_call in llm_result.message.tool_calls:
+                tool_calls.append(
+                    (
+                        tool_call.id,
+                        tool_call.function.name,
+                        json.loads(tool_call.function.arguments),
+                    )
                 )
-            )
-
         return tool_calls
 
     def _init_system_message(
         self, prompt_template: str, prompt_messages: list[PromptMessage]
     ) -> list[PromptMessage]:
         """
-        Initialize system message
+        初始化系统消息
+        Args:
+            prompt_template: 提示词模板
+            prompt_messages: 提示消息列表
+        Returns:
+            list[PromptMessage]: 包含系统消息的提示消息列表
         """
         if not prompt_messages and prompt_template:
             return [
@@ -538,8 +598,11 @@ class FunctionCallingAgentStrategy(AgentStrategy):
         self, prompt_messages: list[PromptMessage]
     ) -> list[PromptMessage]:
         """
-        As for now, gpt supports both fc and vision at the first iteration.
-        We need to remove the image messages from the prompt messages at the first iteration.
+        清除用户提示中的图片消息
+        Args:
+            prompt_messages: 提示消息列表
+        Returns:
+            list[PromptMessage]: 清除图片消息后的提示消息列表
         """
         prompt_messages = deepcopy(prompt_messages)
 
@@ -565,6 +628,17 @@ class FunctionCallingAgentStrategy(AgentStrategy):
         current_thoughts: list[PromptMessage],
         history_prompt_messages: list[PromptMessage],
     ) -> list[PromptMessage]:
+        """
+        组织完整的提示消息列表
+        包括系统提示、历史消息和当前思考过程
+        
+        Args:
+            current_thoughts: 当前思考过程
+            history_prompt_messages: 历史提示消息
+            
+        Returns:
+            list[PromptMessage]: 组织后的提示消息列表
+        """
         prompt_messages = [
             *history_prompt_messages,
             *current_thoughts,
@@ -577,7 +651,11 @@ class FunctionCallingAgentStrategy(AgentStrategy):
     @staticmethod
     def _init_prompt_mcp_tools(mcp_tools: list[dict]) -> list[PromptMessageTool]:
         """
-        Initialize prompt message MCP tools
+        初始化MCP工具的提示消息
+        Args:
+            mcp_tools: MCP工具列表
+        Returns:
+            list[PromptMessageTool]: 工具提示消息列表
         """
         prompt_messages_tools = []
 

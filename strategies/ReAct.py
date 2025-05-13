@@ -1,3 +1,9 @@
+"""
+ReAct (Reasoning and Acting) 策略实现
+这个模块实现了一个基于ReAct范式的智能代理策略，它结合了推理(Reasoning)和行动(Acting)的能力。
+代理通过思考-行动-观察的循环来解决问题。
+"""
+
 import json
 import time
 from collections.abc import Generator, Mapping
@@ -31,41 +37,67 @@ from output_parser.cot_output_parser import CotAgentOutputParser
 from prompt.template import REACT_PROMPT_TEMPLATES
 from utils.mcp_client import McpClients
 
+# 忽略观察结果的提供商列表
 ignore_observation_providers = ["wenxin"]
 
 
 class ReActParams(BaseModel):
-    query: str
-    instruction: str
-    model: AgentModelConfig
-    tools: list[ToolEntity] | None
-    mcp_servers_config: str | None
-    maximum_iterations: int = 3
+    """
+    ReAct策略的参数配置类
+    定义了运行ReAct代理所需的所有参数
+    """
+    query: str  # 用户查询
+    instruction: str  # 系统指令
+    model: AgentModelConfig  # 模型配置
+    tools: list[ToolEntity] | None  # 可用工具列表
+    mcp_servers_config: str | None  # MCP服务器配置
+    maximum_iterations: int = 3  # 最大迭代次数
 
 
 class AgentPromptEntity(BaseModel):
     """
-    Agent Prompt Entity.
+    代理提示词实体类
+    用于管理代理的提示词模板
     """
-
-    first_prompt: str
-    next_iteration: str
+    first_prompt: str  # 首次提示词
+    next_iteration: str  # 后续迭代的提示词
 
 
 class ReActAgentStrategy(AgentStrategy):
+    """
+    ReAct代理策略实现类
+    实现了基于ReAct范式的代理策略，通过思考-行动-观察的循环来解决问题
+    """
     def __init__(self, runtime, session):
+        """
+        初始化ReAct代理策略
+        Args:
+            runtime: 运行时环境
+            session: 会话对象
+        """
         super().__init__(runtime, session)
-        self.query = ""
-        self.instruction = ""
-        self.history_prompt_messages = []
-        self.prompt_messages_tools = []
+        self.query = ""  # 用户查询
+        self.instruction = ""  # 系统指令
+        self.history_prompt_messages = []  # 历史提示消息
+        self.prompt_messages_tools = []  # 工具提示消息
 
     @property
     def _user_prompt_message(self) -> UserPromptMessage:
+        """
+        生成用户提示消息
+        Returns:
+            UserPromptMessage: 用户提示消息对象
+        """
         return UserPromptMessage(content=self.query)
 
     @property
     def _system_prompt_message(self) -> SystemPromptMessage:
+        """
+        生成系统提示消息
+        包含工具列表和指令信息
+        Returns:
+            SystemPromptMessage: 系统提示消息对象
+        """
         prompt_entity = AgentPromptEntity(
             first_prompt=REACT_PROMPT_TEMPLATES["english"]["chat"]["prompt"],
             next_iteration=REACT_PROMPT_TEMPLATES["english"]["chat"][
@@ -76,6 +108,7 @@ class ReActAgentStrategy(AgentStrategy):
             raise ValueError("Agent prompt configuration is not set")
         first_prompt = prompt_entity.first_prompt
 
+        # 替换提示词模板中的变量
         system_prompt = (
             first_prompt.replace("{{instruction}}", self.instruction)
             .replace(
@@ -98,7 +131,14 @@ class ReActAgentStrategy(AgentStrategy):
 
     def _invoke(self, parameters: dict[str, Any]) -> Generator[AgentInvokeMessage]:
         """
-        Run ReAct agent application
+        运行ReAct代理应用
+        实现了ReAct的核心逻辑，包括思考-行动-观察的循环
+        
+        Args:
+            parameters: 运行参数
+            
+        Yields:
+            AgentInvokeMessage: 代理执行过程中的消息
         """
 
         try:
@@ -397,7 +437,12 @@ class ReActAgentStrategy(AgentStrategy):
             self, query, prompt_messages: list[PromptMessage]
     ) -> list[PromptMessage]:
         """
-        Organize user query
+        组织用户查询相关的提示消息
+        Args:
+            query: 用户查询
+            prompt_messages: 提示消息列表
+        Returns:
+            list[PromptMessage]: 组织后的提示消息列表
         """
         prompt_messages.append(UserPromptMessage(content=query))
 
@@ -407,53 +452,21 @@ class ReActAgentStrategy(AgentStrategy):
             self, agent_scratchpad: list, query: str
     ) -> list[PromptMessage]:
         """
-        Organize
+        组织完整的提示消息列表
+        包括系统提示、历史消息、当前思考过程和用户查询
+        
+        Args:
+            agent_scratchpad: 代理的思考过程记录
+            query: 用户查询
+            
+        Returns:
+            list[PromptMessage]: 组织后的提示消息列表
         """
-        # organize system prompt
-        system_message = self._system_prompt_message
-
-        # organize current assistant messages
-        agent_scratchpad = agent_scratchpad
-        if not agent_scratchpad:
-            assistant_messages = []
-        else:
-            assistant_message = AssistantPromptMessage(content="")
-            for unit in agent_scratchpad:
-                if unit.is_final():
-                    assert isinstance(assistant_message.content, str)
-                    assistant_message.content += f"Final Answer: {unit.agent_response}"
-                else:
-                    assert isinstance(assistant_message.content, str)
-                    assistant_message.content += f"Thought: {unit.thought}\n\n"
-                    if unit.action_str:
-                        assistant_message.content += f"Action: {unit.action_str}\n\n"
-                    if unit.observation:
-                        assistant_message.content += (
-                            f"Observation: {unit.observation}\n\n"
-                        )
-
-            assistant_messages = [assistant_message]
-
-        # query messages
-        query_messages = self._organize_user_query(query, [])
-
-        if assistant_messages:
-            # organize historic prompt messages
-            historic_messages = self.history_prompt_messages
-            messages = [
-                system_message,
-                *historic_messages,
-                *query_messages,
-                *assistant_messages,
-                UserPromptMessage(content="continue"),
-            ]
-        else:
-            # organize historic prompt messages
-            historic_messages = self.history_prompt_messages
-            messages = [system_message, *historic_messages, *query_messages]
-
-        # join all messages
-        return messages
+        prompt_messages = []
+        prompt_messages.append(self._system_prompt_message)
+        prompt_messages.extend(self.history_prompt_messages)
+        prompt_messages.append(self._user_prompt_message)
+        return prompt_messages
 
     def _handle_invoke_action(
             self,
@@ -464,14 +477,18 @@ class ReActAgentStrategy(AgentStrategy):
             message_file_ids: list[str],
     ) -> tuple[str, dict[str, Any] | str]:
         """
-        handle invoke action
-        :param action: action
-        :param mcp_clients: MCP Clients
-        :param tool_instances: tool instances
-        :param mcp_tool_instances: MCP tool instances
-        :param message_file_ids: message file ids
-        :param trace_manager: trace manager
-        :return: observation, meta
+        处理代理的动作调用
+        根据动作类型选择合适的工具并执行
+        
+        Args:
+            action: 代理的动作
+            mcp_clients: MCP客户端实例
+            tool_instances: 工具实例映射
+            mcp_tool_instances: MCP工具实例映射
+            message_file_ids: 消息文件ID列表
+            
+        Returns:
+            tuple[str, dict[str, Any] | str]: 执行结果和元数据
         """
         # action is tool call, invoke tool
         tool_call_name = action.action_name
@@ -548,17 +565,26 @@ class ReActAgentStrategy(AgentStrategy):
 
     def _convert_dict_to_action(self, action: dict) -> AgentScratchpadUnit.Action:
         """
-        convert dict to action
+        将字典转换为动作对象
+        Args:
+            action: 动作字典
+        Returns:
+            AgentScratchpadUnit.Action: 动作对象
         """
-        return AgentScratchpadUnit.Action(
-            action_name=action["action"], action_input=action["action_input"]
-        )
+        return AgentScratchpadUnit.Action(**action)
 
     def _format_assistant_message(
             self, agent_scratchpad: list[AgentScratchpadUnit]
     ) -> str:
         """
-        format assistant message
+        格式化助手的回复消息
+        将代理的思考过程转换为可读的文本格式
+        
+        Args:
+            agent_scratchpad: 代理的思考过程记录
+            
+        Returns:
+            str: 格式化后的消息文本
         """
         message = ""
         for scratchpad in agent_scratchpad:
@@ -576,7 +602,11 @@ class ReActAgentStrategy(AgentStrategy):
     @staticmethod
     def _init_prompt_mcp_tools(mcp_tools: list[dict]) -> list[PromptMessageTool]:
         """
-        Initialize prompt message MCP tools
+        初始化MCP工具的提示消息
+        Args:
+            mcp_tools: MCP工具列表
+        Returns:
+            list[PromptMessageTool]: 工具提示消息列表
         """
         prompt_messages_tools = []
 
