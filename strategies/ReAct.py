@@ -1,3 +1,12 @@
+"""
+ReAct (Reasoning and Acting) Agent 策略实现
+这个模块实现了一个基于 ReAct 模式的智能代理策略,它能够:
+1. 通过思考(Reasoning)来理解问题
+2. 采取行动(Acting)来执行工具调用
+3. 观察(Observation)执行结果
+4. 最终给出答案
+"""
+
 import json
 import time
 from collections.abc import Generator, Mapping
@@ -31,10 +40,21 @@ from output_parser.cot_output_parser import CotAgentOutputParser
 from prompt.template import REACT_PROMPT_TEMPLATES
 from utils.mcp_client import McpClients
 
+# 忽略观察结果的提供商列表
 ignore_observation_providers = ["wenxin"]
 
 
 class ReActParams(BaseModel):
+    """
+    ReAct 策略的参数配置类
+    包含:
+    - query: 用户查询
+    - instruction: 系统指令
+    - model: 模型配置
+    - tools: 可用工具列表
+    - mcp_servers_config: MCP服务器配置
+    - maximum_iterations: 最大迭代次数
+    """
     query: str
     instruction: str
     model: AgentModelConfig
@@ -45,15 +65,27 @@ class ReActParams(BaseModel):
 
 class AgentPromptEntity(BaseModel):
     """
-    Agent Prompt Entity.
+    Agent 提示词实体类
+    包含:
+    - first_prompt: 首次提示词
+    - next_iteration: 后续迭代的提示词
     """
-
     first_prompt: str
     next_iteration: str
 
 
 class ReActAgentStrategy(AgentStrategy):
+    """
+    ReAct Agent 策略实现类
+    实现了基于 ReAct 模式的智能代理策略
+    """
     def __init__(self, runtime, session):
+        """
+        初始化 ReAct Agent 策略
+        Args:
+            runtime: 运行时环境
+            session: 会话对象
+        """
         super().__init__(runtime, session)
         self.query = ""
         self.instruction = ""
@@ -62,10 +94,18 @@ class ReActAgentStrategy(AgentStrategy):
 
     @property
     def _user_prompt_message(self) -> UserPromptMessage:
+        """获取用户提示消息"""
         return UserPromptMessage(content=self.query)
 
     @property
     def _system_prompt_message(self) -> SystemPromptMessage:
+        """
+        获取系统提示消息
+        包含:
+        1. 基础提示词
+        2. 可用工具信息
+        3. 工具名称列表
+        """
         prompt_entity = AgentPromptEntity(
             first_prompt=REACT_PROMPT_TEMPLATES["english"]["chat"]["prompt"],
             next_iteration=REACT_PROMPT_TEMPLATES["english"]["chat"][
@@ -98,7 +138,17 @@ class ReActAgentStrategy(AgentStrategy):
 
     def _invoke(self, parameters: dict[str, Any]) -> Generator[AgentInvokeMessage]:
         """
-        Run ReAct agent application
+        执行 ReAct agent 应用
+        主要流程:
+        1. 初始化参数和状态
+        2. 循环执行思考-行动-观察过程
+        3. 直到达到最大迭代次数或得到最终答案
+        
+        Args:
+            parameters: 参数字典,包含查询、指令、模型配置等
+            
+        Yields:
+            AgentInvokeMessage: 执行过程中的消息
         """
 
         try:
@@ -397,7 +447,12 @@ class ReActAgentStrategy(AgentStrategy):
             self, query, prompt_messages: list[PromptMessage]
     ) -> list[PromptMessage]:
         """
-        Organize user query
+        组织用户查询消息
+        Args:
+            query: 用户查询
+            prompt_messages: 已有的提示消息列表
+        Returns:
+            list[PromptMessage]: 更新后的提示消息列表
         """
         prompt_messages.append(UserPromptMessage(content=query))
 
@@ -407,7 +462,18 @@ class ReActAgentStrategy(AgentStrategy):
             self, agent_scratchpad: list, query: str
     ) -> list[PromptMessage]:
         """
-        Organize
+        组织完整的提示消息列表
+        包含:
+        1. 系统提示消息
+        2. 历史消息
+        3. 用户查询
+        4. 助手回复
+        
+        Args:
+            agent_scratchpad: Agent 草稿单元列表
+            query: 用户查询
+        Returns:
+            list[PromptMessage]: 完整的提示消息列表
         """
         # organize system prompt
         system_message = self._system_prompt_message
@@ -464,14 +530,15 @@ class ReActAgentStrategy(AgentStrategy):
             message_file_ids: list[str],
     ) -> tuple[str, dict[str, Any] | str]:
         """
-        handle invoke action
-        :param action: action
-        :param mcp_clients: MCP Clients
-        :param tool_instances: tool instances
-        :param mcp_tool_instances: MCP tool instances
-        :param message_file_ids: message file ids
-        :param trace_manager: trace manager
-        :return: observation, meta
+        处理工具调用动作
+        Args:
+            action: 要执行的动作
+            mcp_clients: MCP 客户端实例
+            tool_instances: 工具实例映射
+            mcp_tool_instances: MCP 工具实例映射
+            message_file_ids: 消息文件ID列表
+        Returns:
+            tuple: (执行结果, 执行参数)
         """
         # action is tool call, invoke tool
         tool_call_name = action.action_name
@@ -548,7 +615,11 @@ class ReActAgentStrategy(AgentStrategy):
 
     def _convert_dict_to_action(self, action: dict) -> AgentScratchpadUnit.Action:
         """
-        convert dict to action
+        将字典转换为动作对象
+        Args:
+            action: 动作字典
+        Returns:
+            AgentScratchpadUnit.Action: 动作对象
         """
         return AgentScratchpadUnit.Action(
             action_name=action["action"], action_input=action["action_input"]
@@ -558,7 +629,11 @@ class ReActAgentStrategy(AgentStrategy):
             self, agent_scratchpad: list[AgentScratchpadUnit]
     ) -> str:
         """
-        format assistant message
+        格式化助手消息
+        Args:
+            agent_scratchpad: Agent 草稿单元列表
+        Returns:
+            str: 格式化后的消息
         """
         message = ""
         for scratchpad in agent_scratchpad:
@@ -576,7 +651,11 @@ class ReActAgentStrategy(AgentStrategy):
     @staticmethod
     def _init_prompt_mcp_tools(mcp_tools: list[dict]) -> list[PromptMessageTool]:
         """
-        Initialize prompt message MCP tools
+        初始化 MCP 工具的提示消息
+        Args:
+            mcp_tools: MCP 工具列表
+        Returns:
+            list[PromptMessageTool]: 提示消息工具列表
         """
         prompt_messages_tools = []
 
