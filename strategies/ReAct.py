@@ -159,16 +159,27 @@ class ReActAgentStrategy(AgentStrategy):
         # Init parameters
         self.query = react_params.query
         self.instruction = react_params.instruction
+        print(f"用户提问: {self.query}")
+        # print(self.instruction)
+        # print(react_params.model)
+        # print(react_params.tools)
+        # print(react_params.mcp_servers_config)
+        print(f"最大迭代次数: {react_params.maximum_iterations}")
+        # agent_scratchpad 用于存储代理的思考和行动历史记录
         agent_scratchpad = []
         iteration_step = 1
         max_iteration_steps = react_params.maximum_iterations
         run_agent_state = True
         llm_usage: dict[str, Optional[LLMUsage]] = {"usage": None}
         final_answer = ""
+        # 初始化提示消息列表，用于构建完整的对话历史
         prompt_messages = []
 
         # Init model
         model = react_params.model
+        # 初始化模型停止词列表
+        # 从模型配置中获取停止词，用于控制 LLM 在遇到这些词时停止生成
+        # 如果模型配置中没有指定停止词，则使用空列表
         stop = (
             react_params.model.completion_params.get("stop", [])
             if react_params.model.completion_params
@@ -208,10 +219,21 @@ class ReActAgentStrategy(AgentStrategy):
         prompt_messages_tools = self._init_prompt_tools(tools)
         prompt_messages_tools.extend(self._init_prompt_mcp_tools(mcp_tools))
         self._prompt_messages_tools = prompt_messages_tools
+        
+        # 打印转换后的工具信息，用于调试
+        print("=== prompt_messages_tools ===")
+        for tool in prompt_messages_tools:
+            print(f"工具名称: {tool.name}")
+            print(f"工具描述: {tool.description}")
+            print(f"工具参数: {tool.parameters}")
+            print("---")
+        print(f"总共 {len(prompt_messages_tools)} 个工具")
+        print("=============================")
 
         while run_agent_state and iteration_step <= max_iteration_steps:
             # continue to run until there is not any tool call
             run_agent_state = False
+            # 记录当前轮次开始的时间戳，用于计算轮次执行耗时
             round_started_at = time.perf_counter()
             round_log = self.create_log_message(
                 label=f"ROUND {iteration_step}",
@@ -221,6 +243,7 @@ class ReActAgentStrategy(AgentStrategy):
                 },
                 status=ToolInvokeMessage.LogMessage.LogStatus.START,
             )
+            # 将轮次开始的日志消息返回给调用者，用于实时显示执行进度
             yield round_log
             if iteration_step == max_iteration_steps:
                 # the last iteration, remove all tools
@@ -230,24 +253,64 @@ class ReActAgentStrategy(AgentStrategy):
 
             # recalc llm max tokens
             prompt_messages = self._organize_prompt_messages(
-                agent_scratchpad, self.query
+                agent_scratchpad, self.query, max_iteration_steps
             )
             if model.entity and model.completion_params:
                 self.recalc_llm_max_tokens(
                     model.entity, prompt_messages, model.completion_params
                 )
             # invoke model
+            from datetime import datetime
+            print(f"=== 开始调用LLM === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+            
+            # 打印prompt_messages，类似curl格式
+            print("=== LLM API 请求体（类似curl格式）===")
+            api_request = {
+                "model": model.model,
+                "messages": [
+                    {
+                        "role": msg.role.value if hasattr(msg, 'role') else (
+                            "system" if isinstance(msg, SystemPromptMessage) else
+                            "user" if isinstance(msg, UserPromptMessage) else
+                            "assistant"
+                        ),
+                        "content": msg.content
+                    }
+                    for msg in prompt_messages
+                ],
+                "stream": True,
+                "stop": stop,
+                **(model.completion_params if model.completion_params else {})
+            }
+            
+            print("curl -X POST 'https://api.openai.com/v1/chat/completions' \\")
+            print("  -H 'Content-Type: application/json' \\")
+            print("  -H 'Authorization: Bearer YOUR_API_KEY' \\")
+            print(f"  -d '{json.dumps(api_request, ensure_ascii=False, indent=2)}'")
+            print("========================================")
+            
             chunks = self.session.model.llm.invoke(
                 model_config=LLMModelConfig(**model.model_dump(mode="json")),
                 prompt_messages=prompt_messages,
                 stream=True,
                 stop=stop,
             )
+            print(f"=== LLM调用完成，开始处理流式输出 === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
 
             usage_dict = {}
+            # 先将chunks转换为列表以便多次遍历
+            chunks_list = list(chunks)
+            print(f"=== 原始chunks数量: {len(chunks_list)} === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+            for i, chunk in enumerate(chunks_list[:3]):  # 只打印前3个chunk
+                print(f"原始chunk {i}: {chunk}")
+            
             react_chunks = CotAgentOutputParser.handle_react_stream_output(
-                chunks, usage_dict
+                iter(chunks_list), usage_dict  # 重新创建迭代器
             )
+            # 也将react_chunks转换为列表
+            react_chunks_list = list(react_chunks)
+            print(f"=== 解析后react_chunks数量: {len(react_chunks_list)} === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+            
             scratchpad = AgentScratchpadUnit(
                 agent_response="",
                 thought="",
@@ -269,26 +332,66 @@ class ReActAgentStrategy(AgentStrategy):
             )
             yield model_log
 
-            for chunk in react_chunks:
+            # 遍历从LLM输出解析出来的ReAct块（思考或动作）
+            print(f"=== 开始处理 {len(react_chunks_list)} 个react块 === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+            
+            # 新增变量来收集原始的react_chunks_list所有内容
+            original_agent_response = ""
+            
+            for i, chunk in enumerate(react_chunks_list):
+                # print(f"\n--- 处理第 {i+1} 个块 ---")
+                
+                # 收集原始内容到新变量
+                if isinstance(chunk, AgentScratchpadUnit.Action):
+                    original_agent_response += json.dumps(chunk.model_dump())
+                else:
+                    original_agent_response += str(chunk)
+                
+                # 如果当前块是一个动作(Action)
                 if isinstance(chunk, AgentScratchpadUnit.Action):
                     action = chunk
-                    # detect action
+                    print(f"✓ 检测到动作: {action.action_name}")
+                    print(f"✓ 动作参数: {action.action_input}")
+                    # 检测到动作，将动作信息添加到agent_response中
                     assert scratchpad.agent_response is not None
-                    scratchpad.agent_response += json.dumps(chunk.model_dump())
+                    action_json = json.dumps(chunk.model_dump())
+                    scratchpad.agent_response += action_json
+                    print(f"✓ 添加动作JSON: {action_json}")
 
-                    scratchpad.action_str = json.dumps(chunk.model_dump())
+                    # 将动作转换为JSON字符串保存，用于后续工具调用
+                    scratchpad.action_str = action_json
                     scratchpad.action = action
+                    print(f"✓ 动作已保存到scratchpad")
                 else:
+                    # 如果不是动作，说明是思考过程的文本
+                    # print(f"✓ 检测到思考内容: {repr(chunk)}")
+                    
                     scratchpad.agent_response = scratchpad.agent_response or ""
                     scratchpad.thought = scratchpad.thought or ""
-                    scratchpad.agent_response += chunk
-                    scratchpad.thought += chunk
+                    
+                    # 将思考内容累加到agent_response和thought中
+                    scratchpad.agent_response += str(chunk)
+                    scratchpad.thought += str(chunk)
+                    
+                # print(f"累积思考长度: {len(scratchpad.thought)} 字符")
+            
+            # 确保thought字段有内容，如果为空就设置默认值
+            print(f"\n=== 处理完所有块后 === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+            print(f"最终思考内容: {repr(scratchpad.thought)}")
+            print(f"思考内容长度: {len(scratchpad.thought)}")
+
+            print(f"=== 原始agent_response: {original_agent_response} === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+            
             scratchpad.thought = (
                 scratchpad.thought.strip()
-                if scratchpad.thought
+                if scratchpad.thought.strip()  # 确保strip后不为空
                 else "I am thinking about how to help you"
             )
+            print(f"=== 处理后思考内容: {repr(scratchpad.thought)} === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+            print(f"=== 是否有动作: {'是' if scratchpad.action else '否'} ===")
+            # 将完整的scratchpad添加到历史记录中
             agent_scratchpad.append(scratchpad)
+            print(f"=== scratchpad已添加到历史记录，当前历史记录数量: {len(agent_scratchpad)} === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
 
             # get llm usage
             if "usage" in usage_dict:
@@ -459,7 +562,7 @@ class ReActAgentStrategy(AgentStrategy):
         return prompt_messages
 
     def _organize_prompt_messages(
-            self, agent_scratchpad: list, query: str
+            self, agent_scratchpad: list, query: str, maximum_iterations: int = 3
     ) -> list[PromptMessage]:
         """
         组织完整的提示消息列表
@@ -472,14 +575,14 @@ class ReActAgentStrategy(AgentStrategy):
         Args:
             agent_scratchpad: Agent 草稿单元列表
             query: 用户查询
+            maximum_iterations: 最大迭代次数，用于动态调整历史记录保留数量
         Returns:
             list[PromptMessage]: 完整的提示消息列表
         """
         # organize system prompt
         system_message = self._system_prompt_message
-
+        
         # organize current assistant messages
-        agent_scratchpad = agent_scratchpad
         if not agent_scratchpad:
             assistant_messages = []
         else:
@@ -506,6 +609,7 @@ class ReActAgentStrategy(AgentStrategy):
         if assistant_messages:
             # organize historic prompt messages
             historic_messages = self.history_prompt_messages
+            
             messages = [
                 system_message,
                 *historic_messages,
@@ -518,7 +622,15 @@ class ReActAgentStrategy(AgentStrategy):
             historic_messages = self.history_prompt_messages
             messages = [system_message, *historic_messages, *query_messages]
 
-        # join all messages
+        # 基于 maximum_iterations 控制最终消息总数
+        max_total_messages = min(maximum_iterations, 10)  # 迭代次数，最多10条
+        if len(messages) > max_total_messages:
+            # 保留system消息（第一条）和最近的消息
+            messages = [messages[0]] + messages[-(max_total_messages-1):]
+            print(f"=== 控制最终消息数：从原来的更多条减少到 {len(messages)} 条 ===")
+        
+        print(f"总共 {len(messages)} 条消息")
+        print("======================")
         return messages
 
     def _handle_invoke_action(
