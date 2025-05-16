@@ -133,7 +133,7 @@ class ReActAgentStrategy(AgentStrategy):
                 ", ".join([tool.name for tool in self._prompt_messages_tools]),
             )
         )
-
+        # print(f"system_prompt: {system_prompt}")
         return SystemPromptMessage(content=system_prompt)
 
     def _invoke(self, parameters: dict[str, Any]) -> Generator[AgentInvokeMessage]:
@@ -221,20 +221,22 @@ class ReActAgentStrategy(AgentStrategy):
         self._prompt_messages_tools = prompt_messages_tools
         
         # 打印转换后的工具信息，用于调试
-        print("=== prompt_messages_tools ===")
-        for tool in prompt_messages_tools:
-            print(f"工具名称: {tool.name}")
-            print(f"工具描述: {tool.description}")
-            print(f"工具参数: {tool.parameters}")
-            print("---")
-        print(f"总共 {len(prompt_messages_tools)} 个工具")
-        print("=============================")
+        # print("=== prompt_messages_tools ===")
+        # for tool in prompt_messages_tools:
+        #     print(f"工具名称: {tool.name}")
+        #     print(f"工具描述: {tool.description}")
+        #     print(f"工具参数: {tool.parameters}")
+        #     print("---")
+        # print(f"总共 {len(prompt_messages_tools)} 个工具")
+        # print("=============================")
 
         while run_agent_state and iteration_step <= max_iteration_steps:
             # continue to run until there is not any tool call
             run_agent_state = False
             # 记录当前轮次开始的时间戳，用于计算轮次执行耗时
             round_started_at = time.perf_counter()
+            # 打印下第几轮
+            print(f"第 {iteration_step} 轮")
             round_log = self.create_log_message(
                 label=f"ROUND {iteration_step}",
                 data={},
@@ -264,30 +266,30 @@ class ReActAgentStrategy(AgentStrategy):
             print(f"=== 开始调用LLM === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
             
             # 打印prompt_messages，类似curl格式
-            print("=== LLM API 请求体（类似curl格式）===")
-            api_request = {
-                "model": model.model,
-                "messages": [
-                    {
-                        "role": msg.role.value if hasattr(msg, 'role') else (
-                            "system" if isinstance(msg, SystemPromptMessage) else
-                            "user" if isinstance(msg, UserPromptMessage) else
-                            "assistant"
-                        ),
-                        "content": msg.content
-                    }
-                    for msg in prompt_messages
-                ],
-                "stream": True,
-                "stop": stop,
-                **(model.completion_params if model.completion_params else {})
-            }
+            # print("=== LLM API 请求体（类似curl格式）===")
+            # api_request = {
+            #     "model": model.model,
+            #     "messages": [
+            #         {
+            #             "role": msg.role.value if hasattr(msg, 'role') else (
+            #                 "system" if isinstance(msg, SystemPromptMessage) else
+            #                 "user" if isinstance(msg, UserPromptMessage) else
+            #                 "assistant"
+            #             ),
+            #             "content": msg.content
+            #         }
+            #         for msg in prompt_messages
+            #     ],
+            #     "stream": True,
+            #     "stop": stop,
+            #     **(model.completion_params if model.completion_params else {})
+            # }
             
-            print("curl -X POST 'https://api.openai.com/v1/chat/completions' \\")
-            print("  -H 'Content-Type: application/json' \\")
-            print("  -H 'Authorization: Bearer YOUR_API_KEY' \\")
-            print(f"  -d '{json.dumps(api_request, ensure_ascii=False, indent=2)}'")
-            print("========================================")
+            # print("curl -X POST 'https://api.openai.com/v1/chat/completions' \\")
+            # print("  -H 'Content-Type: application/json' \\")
+            # print("  -H 'Authorization: Bearer YOUR_API_KEY' \\")
+            # print(f"  -d '{json.dumps(api_request, ensure_ascii=False, indent=2)}'")
+            # print("========================================")
             
             chunks = self.session.model.llm.invoke(
                 model_config=LLMModelConfig(**model.model_dump(mode="json")),
@@ -300,9 +302,9 @@ class ReActAgentStrategy(AgentStrategy):
             usage_dict = {}
             # 先将chunks转换为列表以便多次遍历
             chunks_list = list(chunks)
-            print(f"=== 原始chunks数量: {len(chunks_list)} === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
-            for i, chunk in enumerate(chunks_list[:3]):  # 只打印前3个chunk
-                print(f"原始chunk {i}: {chunk}")
+            # print(f"=== 原始chunks数量: {len(chunks_list)} === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+            # for i, chunk in enumerate(chunks_list[:3]):  # 只打印前3个chunk
+            #     print(f"原始chunk {i}: {chunk}")
             
             react_chunks = CotAgentOutputParser.handle_react_stream_output(
                 iter(chunks_list), usage_dict  # 重新创建迭代器
@@ -389,6 +391,78 @@ class ReActAgentStrategy(AgentStrategy):
             )
             print(f"=== 处理后思考内容: {repr(scratchpad.thought)} === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
             print(f"=== 是否有动作: {'是' if scratchpad.action else '否'} ===")
+            
+            # 检查前一轮是否调用了工具
+            has_tool_call = False
+            tool_name = "无"
+            if len(agent_scratchpad) > 0:
+                prev_scratchpad = agent_scratchpad[-1]
+                has_tool_call = bool(prev_scratchpad.observation and prev_scratchpad.observation.strip())
+                tool_name = prev_scratchpad.action.action_name if prev_scratchpad.action else "无"
+            
+            print(f"=== 前一轮是否调用了工具: {'是' if has_tool_call else '否'} ===")
+            print(f"=== 前一轮调用的工具: {tool_name} ===")
+
+            # 1.设置异常最大次数=min(max_iteration_steps,3)
+            max_retry_steps = min(max_iteration_steps, 3)
+            # 2.如果(是否有动作为否,并且iteration_step<异常最大次数,并且前一轮未调用工具),那么(提问不变并且iteration_step+1),进行新的一轮大模型调用
+            if not scratchpad.action and iteration_step < max_retry_steps and not has_tool_call:
+                print(f"=== 检测到无动作，当前轮次 {iteration_step} < 最大重试次数 {max_retry_steps}，将进行重试 ===")
+                
+                # 记录模型调用的日志
+                yield self.finish_log_message(
+                    log=model_log,
+                    data={"thought": scratchpad.thought, "action": {"action": scratchpad.agent_response}},
+                    metadata={
+                        LogMetadata.STARTED_AT: model_started_at,
+                        LogMetadata.FINISHED_AT: time.perf_counter(),
+                        LogMetadata.ELAPSED_TIME: time.perf_counter() - model_started_at,
+                        LogMetadata.PROVIDER: model.provider,
+                        LogMetadata.TOTAL_PRICE: usage_dict["usage"].total_price
+                        if usage_dict["usage"]
+                        else 0,
+                        LogMetadata.CURRENCY: usage_dict["usage"].currency
+                        if usage_dict["usage"]
+                        else "",
+                        LogMetadata.TOTAL_TOKENS: usage_dict["usage"].total_tokens
+                        if usage_dict["usage"]
+                        else 0,
+                    },
+                )
+                
+                # 记录当前轮次的日志
+                yield self.finish_log_message(
+                    log=round_log,
+                    data={
+                        "action_name": "",
+                        "action_input": "",
+                        "thought": scratchpad.thought,
+                        "observation": f"无动作，准备重试 (前一轮{'调用了工具' if has_tool_call else '未调用工具'}, 工具: {tool_name})",
+                    },
+                    metadata={
+                        LogMetadata.STARTED_AT: round_started_at,
+                        LogMetadata.FINISHED_AT: time.perf_counter(),
+                        LogMetadata.ELAPSED_TIME: time.perf_counter() - round_started_at,
+                        LogMetadata.TOTAL_PRICE: usage_dict["usage"].total_price
+                        if usage_dict["usage"]
+                        else 0,
+                        LogMetadata.CURRENCY: usage_dict["usage"].currency
+                        if usage_dict["usage"]
+                        else "",
+                        LogMetadata.TOTAL_TOKENS: usage_dict["usage"].total_tokens
+                        if usage_dict["usage"]
+                        else 0,
+                    },
+                )
+                
+                # 重试时修改用户提问，添加指定格式的提示
+                self.query = f"Very important! Reminder to ALWAYS respond with a valid json blob of a single action: {self.query}"
+                print(f"=== 重试提问: {self.query} ===")
+                
+                run_agent_state = True
+                iteration_step += 1
+                continue
+
             # 将完整的scratchpad添加到历史记录中
             agent_scratchpad.append(scratchpad)
             print(f"=== scratchpad已添加到历史记录，当前历史记录数量: {len(agent_scratchpad)} === {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
@@ -562,7 +636,7 @@ class ReActAgentStrategy(AgentStrategy):
         return prompt_messages
 
     def _organize_prompt_messages(
-            self, agent_scratchpad: list, query: str, maximum_iterations: int = 3
+            self, agent_scratchpad: list, query: str, maximum_iterations: int = 5
     ) -> list[PromptMessage]:
         """
         组织完整的提示消息列表
@@ -595,7 +669,9 @@ class ReActAgentStrategy(AgentStrategy):
                     assert isinstance(assistant_message.content, str)
                     assistant_message.content += f"Thought: {unit.thought}\n\n"
                     if unit.action_str:
-                        assistant_message.content += f"Action: {unit.action_str}\n\n"
+                        # 清理action_input中的具体值以减少噪声, 暂时不清理
+                        cleaned_action_str = unit.action_str # self._clean_action_input(unit.action_str)
+                        assistant_message.content += f"Action: {cleaned_action_str}\n\n"
                     if unit.observation:
                         assistant_message.content += (
                             f"Observation: {unit.observation}\n\n"
@@ -632,6 +708,27 @@ class ReActAgentStrategy(AgentStrategy):
         print(f"总共 {len(messages)} 条消息")
         print("======================")
         return messages
+
+    def _clean_action_input(self, action_str: str) -> str:
+        """
+        清理action_str中的action_input值，保留结构但清空具体参数以减少噪声
+        Args:
+            action_str: 原始的action字符串（JSON格式）
+        Returns:
+            str: 清理后的action字符串
+        """
+        try:
+            action_data = json.loads(action_str)
+            if isinstance(action_data, dict) and "action_input" in action_data:
+                # 保留action_input key但清空value
+                action_data["action_input"] = {}
+                cleaned_str = json.dumps(action_data, ensure_ascii=False)
+                print(f"=== 清理action_input: {action_str} -> {cleaned_str} ===")
+                return cleaned_str
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"=== 清理action_input失败: {e}，保持原值 ===")
+            
+        return action_str
 
     def _handle_invoke_action(
             self,

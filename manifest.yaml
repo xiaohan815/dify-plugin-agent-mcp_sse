@@ -4,7 +4,7 @@ author: junjiem
 name: mcp_see_agent
 label:
   en_US: Agent Strategies (Support MCP Tools)
-  zh_Hans: Agent 策略（支持 MCP 工具）
+  zh_Hans: Agent 策略（LPS 支持 MCP 工具）
 description:
   en_US: Agent strategies collection that provide Function Calling and ReAct (Support MCP SSE / StreamableHTTP fetch and call tools).
   zh_Hans: 提供 Function Calling 和 ReAct 的 Agent 策略集合（支持 MCP SSE / StreamableHTTP 发现和调用工具）。
