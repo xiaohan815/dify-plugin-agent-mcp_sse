@@ -1,6 +1,6 @@
 identity:
   author: junjiem
-  name: mcp_see_agent
+  name: mcp_sse_agent
   label:
     en_US: Support MCP Tools Agent
     zh_Hans: LPS 支持 MCP 工具的 Agent
